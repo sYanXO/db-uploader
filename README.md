@@ -8,12 +8,15 @@ A high-performance Go application designed to efficiently read large JSON datase
 - **High-Performance Loading**: Stream-based JSON reading to handle files larger than available RAM.
 - **Concurrency**: Configurable worker pool to process records in parallel.
 - **Batch Processing**: efficient database insertion using configurable batch sizes.
+- **Retry Handling**: Configurable retry and backoff for transient batch insert failures.
+- **Progress Logs**: Periodic throughput and inserted-record logging during long uploads.
 - **Data Generator**: Built-in utility to generate massive test datasets.
-- **Mock Database**: Currently integrates with a mock database for testing throughput and logic.
+- **Pluggable Backends**: `mock` and `postgres` database drivers.
 
 ### 🗺️ Roadmap
 The following features are currently in development or planned for future releases:
-- [ ] **Real Database Integration**: Support for PostgreSQL and MySQL.
+- [x] **PostgreSQL Integration**: Upload directly into a live PostgreSQL table via DSN.
+- [ ] **MySQL Integration**: Add MySQL backend support.
 - [ ] **Error Handling**: Robust retry mechanisms for failed batches.
 - [ ] **Progress Visualization**: Real-time progress bar and ETA.
 - [ ] **Configuration**: YAML/Env file support for easier configuration.
@@ -42,6 +45,27 @@ go run cmd/uploader/main.go
 
 # Run with custom settings for higher performance
 go run cmd/uploader/main.go -file large_data.json -workers 50 -batch 1000
+
+# Run with custom retry + progress settings
+go run cmd/uploader/main.go -file large_data.json -workers 50 -batch 1000 -retries 5 -retry-delay-ms 200 -progress-interval 1
+
+# Upload to PostgreSQL (set your DSN first)
+export DATABASE_URL='postgres://user:pass@localhost:5432/mydb?sslmode=disable'
+go run cmd/uploader/main.go -driver postgres -dsn "$DATABASE_URL" -table users -file large_data.json -workers 20 -batch 500
+```
+
+### PostgreSQL Schema
+Create a destination table before running:
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+    id BIGINT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    age INT NOT NULL,
+    city TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
 ```
 
 ## 📂 Project Structure
