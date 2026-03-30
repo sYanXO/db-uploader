@@ -31,13 +31,6 @@ type PostgresConfig struct {
 	ConnMaxIdleTime time.Duration
 }
 
-func NewPostgresDB(dsn string, table string) (*PostgresDB, error) {
-	return NewPostgresDBWithConfig(PostgresConfig{
-		DSN:   dsn,
-		Table: table,
-	})
-}
-
 func NewPostgresDBWithConfig(config PostgresConfig) (*PostgresDB, error) {
 	if strings.TrimSpace(config.DSN) == "" {
 		return nil, fmt.Errorf("dsn is required for postgres driver")
