@@ -246,19 +246,7 @@ For the full write-up, see [`BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md).
 - MySQL is not implemented
 - The current benchmark command generates rows in memory rather than reading files, by design
 
-## Recommended Next Steps
 
-If you want to push this toward production-grade ingest performance:
 
-1. Benchmark against a direct Postgres endpoint if you want to isolate pooler overhead
-2. Export benchmark results as JSON or CSV and generate comparison charts
-3. Add cancellation and context propagation through reader, workers, and DB calls
-4. Keep worker and connection counts aligned with real DB capacity instead of increasing them blindly
 
-## Quick Start
-
-```bash
-go test ./...
-go run ./cmd/generate -count 100000 -output data.json
-go run ./cmd/uploader -driver mock -file data.json -workers 10 -batch 100
 ```
