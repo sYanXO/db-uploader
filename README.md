@@ -21,8 +21,8 @@ This repo is functional for concurrent batch inserts, but it is still a benchmar
 
 Important constraints from real testing:
 
-- PostgreSQL bulk ingest currently uses multi-row `INSERT ... VALUES`, not `COPY`
-- The Neon benchmark runs showed intermittent `lib/pq` plus pooler protocol issues under some conditions
+- PostgreSQL bulk ingest now uses `pgx` plus `COPY`
+- The earlier `lib/pq` path showed intermittent Neon pooler protocol issues, which the upgraded path avoids in current benchmark runs
 - Larger runs were blocked by the Neon project storage cap, not by the Go worker pool
 
 Benchmark details are captured in [`BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md).
@@ -162,7 +162,7 @@ Both uploader mode and benchmark mode now report:
 - retry count
 - batch latency: avg, p50, p95, p99, max
 - DB exec latency: avg, p50, p95, p99, max
-- `database/sql` pool stats
+- `pgxpool` connection stats
 
 ## Important Flags
 
@@ -211,19 +211,19 @@ On the tested Neon setup, the best measured configuration was:
 - `max-open-conns=16`
 - `max-idle-conns=16`
 
-Measured DB-ingest results:
+Measured DB-ingest results on the upgraded `pgx` plus `COPY` path:
 
 | Rows | Time | Throughput |
 |---|---:|---:|
-| 100k | 4.11s | 24.3k rows/s |
-| 500k | 17.34s | 28.8k rows/s |
-| 1m | 34.28s | 29.2k rows/s |
+| 100k | 2.69s | 37.2k rows/s |
+| 500k | 12.03s | 41.6k rows/s |
+| 1m | 23.89s | 41.9k rows/s |
+| 2m | 47.25s | 42.3k rows/s |
 
 For the full write-up, see [`BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md).
 
 ## Known Limitations
 
-- PostgreSQL ingest uses `INSERT ... VALUES`, which is slower than `COPY`
 - The project does not yet expose Prometheus metrics
 - There is no config file support yet
 - MySQL is not implemented
@@ -233,9 +233,9 @@ For the full write-up, see [`BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md).
 
 If you want to push this toward production-grade ingest performance:
 
-1. Replace batched inserts with PostgreSQL `COPY`
-2. Move from `lib/pq` to `pgx`
-3. Benchmark against a direct Postgres endpoint if a pooler introduces protocol issues
+1. Benchmark against a direct Postgres endpoint if you want to isolate pooler overhead
+2. Export benchmark results as JSON or CSV and generate comparison charts
+3. Add cancellation and context propagation through reader, workers, and DB calls
 4. Keep worker and connection counts aligned with real DB capacity instead of increasing them blindly
 
 ## Quick Start

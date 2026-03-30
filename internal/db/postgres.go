@@ -1,14 +1,15 @@
 package db
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"db_uploader/internal/models"
 )
@@ -16,8 +17,8 @@ import (
 var identifierPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 type PostgresDB struct {
-	conn          *sql.DB
-	table         string
+	pool          *pgxpool.Pool
+	table         pgx.Identifier
 	insertedCount int64
 }
 
@@ -47,37 +48,45 @@ func NewPostgresDBWithConfig(config PostgresConfig) (*PostgresDB, error) {
 		return nil, err
 	}
 
-	conn, err := sql.Open("postgres", config.DSN)
+	poolConfig, err := pgxpool.ParseConfig(config.DSN)
 	if err != nil {
-		return nil, fmt.Errorf("open postgres connection: %w", err)
+		return nil, fmt.Errorf("parse postgres config: %w", err)
 	}
 
 	if config.MaxOpenConns > 0 {
-		conn.SetMaxOpenConns(config.MaxOpenConns)
+		poolConfig.MaxConns = int32(config.MaxOpenConns)
 	}
 	if config.MaxIdleConns > 0 {
-		conn.SetMaxIdleConns(config.MaxIdleConns)
+		poolConfig.MinConns = min(int32(config.MaxIdleConns), poolConfig.MaxConns)
 	}
 	if config.ConnMaxLifetime > 0 {
-		conn.SetConnMaxLifetime(config.ConnMaxLifetime)
+		poolConfig.MaxConnLifetime = config.ConnMaxLifetime
 	}
 	if config.ConnMaxIdleTime > 0 {
-		conn.SetConnMaxIdleTime(config.ConnMaxIdleTime)
+		poolConfig.MaxConnIdleTime = config.ConnMaxIdleTime
+	}
+	// Prefer simple protocol semantics through poolers and let COPY use the wire protocol directly.
+	poolConfig.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+
+	pool, err := pgxpool.NewWithConfig(ctxBackground(), poolConfig)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres pool: %w", err)
 	}
 
-	if err := conn.Ping(); err != nil {
-		conn.Close()
+	if err := pool.Ping(ctxBackground()); err != nil {
+		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
 	return &PostgresDB{
-		conn:  conn,
+		pool:  pool,
 		table: validatedTable,
 	}, nil
 }
 
 func (db *PostgresDB) Close() error {
-	return db.conn.Close()
+	db.pool.Close()
+	return nil
 }
 
 func (db *PostgresDB) InsertBatch(users []models.User) error {
@@ -85,8 +94,29 @@ func (db *PostgresDB) InsertBatch(users []models.User) error {
 		return nil
 	}
 
-	query, args := buildInsertQuery(db.table, users)
-	if _, err := db.conn.Exec(query, args...); err != nil {
+	rows := make([][]any, 0, len(users))
+	for _, user := range users {
+		createdAt, err := time.Parse(time.RFC3339, user.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("parse created_at for user %d: %w", user.ID, err)
+		}
+
+		rows = append(rows, []any{
+			user.ID,
+			user.Name,
+			user.Email,
+			user.Age,
+			user.City,
+			createdAt,
+		})
+	}
+
+	if _, err := db.pool.CopyFrom(
+		ctxBackground(),
+		db.table,
+		[]string{"id", "name", "email", "age", "city", "created_at"},
+		pgx.CopyFromRows(rows),
+	); err != nil {
 		return err
 	}
 
@@ -98,8 +128,21 @@ func (db *PostgresDB) GetTotalInserted() int64 {
 	return atomic.LoadInt64(&db.insertedCount)
 }
 
-func (db *PostgresDB) GetSQLStats() sql.DBStats {
-	return db.conn.Stats()
+func (db *PostgresDB) GetPoolStats() PoolStats {
+	stats := db.pool.Stat()
+	return PoolStats{
+		MaxConns:                stats.MaxConns(),
+		AcquiredConns:           stats.AcquiredConns(),
+		IdleConns:               stats.IdleConns(),
+		TotalConns:              stats.TotalConns(),
+		AcquireCount:            stats.AcquireCount(),
+		AcquireDuration:         stats.AcquireDuration(),
+		CanceledAcquireCount:    stats.CanceledAcquireCount(),
+		EmptyAcquireCount:       stats.EmptyAcquireCount(),
+		NewConnsCount:           stats.NewConnsCount(),
+		MaxLifetimeDestroyCount: stats.MaxLifetimeDestroyCount(),
+		MaxIdleDestroyCount:     stats.MaxIdleDestroyCount(),
+	}
 }
 
 func (db *PostgresDB) EnsureBenchmarkTable() error {
@@ -110,51 +153,54 @@ func (db *PostgresDB) EnsureBenchmarkTable() error {
 		age INT NOT NULL,
 		city TEXT NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL
-	)`, db.table)
+	)`, db.table.Sanitize())
 
-	_, err := db.conn.Exec(query)
+	_, err := db.pool.Exec(ctxBackground(), query)
 	return err
 }
 
 func (db *PostgresDB) Truncate() error {
-	_, err := db.conn.Exec("TRUNCATE TABLE " + db.table)
+	_, err := db.pool.Exec(ctxBackground(), "TRUNCATE TABLE "+db.table.Sanitize())
 	return err
 }
 
-func buildInsertQuery(table string, users []models.User) (string, []any) {
-	const fieldsPerRow = 6
-
-	var builder strings.Builder
-	builder.WriteString("INSERT INTO ")
-	builder.WriteString(table)
-	builder.WriteString(" (id, name, email, age, city, created_at) VALUES ")
-
-	args := make([]any, 0, len(users)*fieldsPerRow)
-	for i, user := range users {
-		if i > 0 {
-			builder.WriteString(", ")
-		}
-
-		base := i * fieldsPerRow
-		builder.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5, base+6))
-		args = append(args, user.ID, user.Name, user.Email, user.Age, user.City, user.CreatedAt)
-	}
-
-	return builder.String(), args
-}
-
-func validateTableName(table string) (string, error) {
+func validateTableName(table string) (pgx.Identifier, error) {
 	t := strings.TrimSpace(table)
 	if t == "" {
-		return "", fmt.Errorf("table name is required")
+		return nil, fmt.Errorf("table name is required")
 	}
 
 	parts := strings.Split(t, ".")
 	for _, part := range parts {
 		if !identifierPattern.MatchString(part) {
-			return "", fmt.Errorf("invalid table name %q", table)
+			return nil, fmt.Errorf("invalid table name %q", table)
 		}
 	}
 
-	return t, nil
+	return pgx.Identifier(parts), nil
+}
+
+type PoolStats struct {
+	MaxConns                int32         `json:"maxConns"`
+	AcquiredConns           int32         `json:"acquiredConns"`
+	IdleConns               int32         `json:"idleConns"`
+	TotalConns              int32         `json:"totalConns"`
+	AcquireCount            int64         `json:"acquireCount"`
+	AcquireDuration         time.Duration `json:"acquireDuration"`
+	CanceledAcquireCount    int64         `json:"canceledAcquireCount"`
+	EmptyAcquireCount       int64         `json:"emptyAcquireCount"`
+	NewConnsCount           int64         `json:"newConnsCount"`
+	MaxLifetimeDestroyCount int64         `json:"maxLifetimeDestroyCount"`
+	MaxIdleDestroyCount     int64         `json:"maxIdleDestroyCount"`
+}
+
+func ctxBackground() context.Context {
+	return context.Background()
+}
+
+func min(a int32, b int32) int32 {
+	if b == 0 || a < b {
+		return a
+	}
+	return b
 }

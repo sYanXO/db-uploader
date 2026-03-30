@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -23,7 +22,7 @@ type BenchmarkResult struct {
 	RecordsPerSec float64                `json:"recordsPerSec"`
 	BatchesPerSec float64                `json:"batchesPerSec"`
 	Metrics       loader.MetricsSnapshot `json:"metrics"`
-	DBStats       sql.DBStats            `json:"dbStats"`
+	DBStats       db.PoolStats           `json:"dbStats"`
 	StartedAt     time.Time              `json:"startedAt"`
 	CompletedAt   time.Time              `json:"completedAt"`
 	Table         string                 `json:"table"`
@@ -108,7 +107,7 @@ func main() {
 		RecordsPerSec: float64(total) / elapsed.Seconds(),
 		BatchesPerSec: float64(metrics.SuccessfulBatches) / elapsed.Seconds(),
 		Metrics:       metrics,
-		DBStats:       database.GetSQLStats(),
+		DBStats:       database.GetPoolStats(),
 		StartedAt:     startedAt.UTC(),
 		CompletedAt:   completedAt.UTC(),
 		Table:         *table,

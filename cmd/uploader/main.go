@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"flag"
 	"fmt"
 	"log"
@@ -156,21 +155,23 @@ func logProgress(database db.BatchInserter, start time.Time, interval time.Durat
 }
 
 func printDBStats(database db.BatchInserter) {
-	statsProvider, ok := database.(interface{ GetSQLStats() sql.DBStats })
+	statsProvider, ok := database.(interface{ GetPoolStats() db.PoolStats })
 	if !ok {
 		return
 	}
 
-	stats := statsProvider.GetSQLStats()
-	fmt.Printf("DB Pool: max_open=%d open=%d in_use=%d idle=%d wait_count=%d wait_duration=%s max_idle_closed=%d max_idle_time_closed=%d max_lifetime_closed=%d\n",
-		stats.MaxOpenConnections,
-		stats.OpenConnections,
-		stats.InUse,
-		stats.Idle,
-		stats.WaitCount,
-		stats.WaitDuration,
-		stats.MaxIdleClosed,
-		stats.MaxIdleTimeClosed,
-		stats.MaxLifetimeClosed,
+	stats := statsProvider.GetPoolStats()
+	fmt.Printf("DB Pool: max_conns=%d total=%d acquired=%d idle=%d acquire_count=%d acquire_duration=%s canceled_acquire_count=%d empty_acquire_count=%d new_conns=%d max_idle_destroyed=%d max_lifetime_destroyed=%d\n",
+		stats.MaxConns,
+		stats.TotalConns,
+		stats.AcquiredConns,
+		stats.IdleConns,
+		stats.AcquireCount,
+		stats.AcquireDuration,
+		stats.CanceledAcquireCount,
+		stats.EmptyAcquireCount,
+		stats.NewConnsCount,
+		stats.MaxIdleDestroyCount,
+		stats.MaxLifetimeDestroyCount,
 	)
 }
