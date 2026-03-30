@@ -22,6 +22,8 @@ go.work
 *.json
 data.json
 large_data.json
+.cache/
+.tools/
 
 # IDEs
 .vscode/

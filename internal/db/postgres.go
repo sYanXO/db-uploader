@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	_ "github.com/lib/pq"
 
@@ -20,19 +21,48 @@ type PostgresDB struct {
 	insertedCount int64
 }
 
+type PostgresConfig struct {
+	DSN             string
+	Table           string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	ConnMaxIdleTime time.Duration
+}
+
 func NewPostgresDB(dsn string, table string) (*PostgresDB, error) {
-	if strings.TrimSpace(dsn) == "" {
+	return NewPostgresDBWithConfig(PostgresConfig{
+		DSN:   dsn,
+		Table: table,
+	})
+}
+
+func NewPostgresDBWithConfig(config PostgresConfig) (*PostgresDB, error) {
+	if strings.TrimSpace(config.DSN) == "" {
 		return nil, fmt.Errorf("dsn is required for postgres driver")
 	}
 
-	validatedTable, err := validateTableName(table)
+	validatedTable, err := validateTableName(config.Table)
 	if err != nil {
 		return nil, err
 	}
 
-	conn, err := sql.Open("postgres", dsn)
+	conn, err := sql.Open("postgres", config.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres connection: %w", err)
+	}
+
+	if config.MaxOpenConns > 0 {
+		conn.SetMaxOpenConns(config.MaxOpenConns)
+	}
+	if config.MaxIdleConns > 0 {
+		conn.SetMaxIdleConns(config.MaxIdleConns)
+	}
+	if config.ConnMaxLifetime > 0 {
+		conn.SetConnMaxLifetime(config.ConnMaxLifetime)
+	}
+	if config.ConnMaxIdleTime > 0 {
+		conn.SetConnMaxIdleTime(config.ConnMaxIdleTime)
 	}
 
 	if err := conn.Ping(); err != nil {
@@ -66,6 +96,29 @@ func (db *PostgresDB) InsertBatch(users []models.User) error {
 
 func (db *PostgresDB) GetTotalInserted() int64 {
 	return atomic.LoadInt64(&db.insertedCount)
+}
+
+func (db *PostgresDB) GetSQLStats() sql.DBStats {
+	return db.conn.Stats()
+}
+
+func (db *PostgresDB) EnsureBenchmarkTable() error {
+	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		id BIGINT PRIMARY KEY,
+		name TEXT NOT NULL,
+		email TEXT NOT NULL,
+		age INT NOT NULL,
+		city TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL
+	)`, db.table)
+
+	_, err := db.conn.Exec(query)
+	return err
+}
+
+func (db *PostgresDB) Truncate() error {
+	_, err := db.conn.Exec("TRUNCATE TABLE " + db.table)
+	return err
 }
 
 func buildInsertQuery(table string, users []models.User) (string, []any) {
