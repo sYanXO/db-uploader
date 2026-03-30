@@ -1,61 +1,74 @@
 # DB Uploader
 
-A high-performance Go application designed to efficiently read large JSON datasets and upload them to a database using concurrent workers.
+`db-uploader` is a Go bulk-ingest tool for loading user records into either a mock backend or PostgreSQL with concurrent workers and batched inserts.
 
-## 🚀 Features
+It supports two main workflows:
 
-### Current Features
-- **High-Performance Loading**: Stream-based JSON reading to handle files larger than available RAM.
-- **Concurrency**: Configurable worker pool to process records in parallel.
-- **Batch Processing**: efficient database insertion using configurable batch sizes.
-- **Retry Handling**: Configurable retry and backoff for transient batch insert failures.
-- **Progress Logs**: Periodic throughput and inserted-record logging during long uploads.
-- **Data Generator**: Built-in utility to generate massive test datasets.
-- **Pluggable Backends**: `mock` and `postgres` database drivers.
+- file-driven uploads from a JSON array
+- direct synthetic benchmark runs against PostgreSQL
 
-### 🗺️ Roadmap
-The following features are currently in development or planned for future releases:
-- [x] **PostgreSQL Integration**: Upload directly into a live PostgreSQL table via DSN.
-- [ ] **MySQL Integration**: Add MySQL backend support.
-- [ ] **Error Handling**: Robust retry mechanisms for failed batches.
-- [ ] **Progress Visualization**: Real-time progress bar and ETA.
-- [ ] **Configuration**: YAML/Env file support for easier configuration.
-- [ ] **Docker Support**: Containerization for easy deployment.
-- [ ] **Metrics**: Prometheus metrics for monitoring upload performance.
+## What It Does
 
-## 🛠️ Usage
+- Streams large JSON files without loading the entire dataset into memory
+- Inserts records in batches with configurable worker concurrency
+- Retries failed batch inserts with linear backoff
+- Reports throughput and latency metrics for upload runs
+- Supports a dedicated PostgreSQL benchmark mode
 
-### 1. Generate Test Data
-First, generate a large JSON file to test the uploader.
+## Current State
+
+This repo is functional for concurrent batch inserts, but it is still a benchmark-oriented project rather than a production-ready ingestion system.
+
+Important constraints from real testing:
+
+- PostgreSQL bulk ingest currently uses multi-row `INSERT ... VALUES`, not `COPY`
+- The Neon benchmark runs showed intermittent `lib/pq` plus pooler protocol issues under some conditions
+- Larger runs were blocked by the Neon project storage cap, not by the Go worker pool
+
+Benchmark details are captured in [`BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md).
+
+## Repo Layout
+
+- [`cmd/uploader`](cmd/uploader) runs file-based uploads
+- [`cmd/generate`](cmd/generate) generates large JSON datasets
+- [`cmd/benchmark`](cmd/benchmark) runs direct PostgreSQL ingest benchmarks without JSON files
+- [`internal/loader`](internal/loader) contains the worker pool, retry logic, and metrics collection
+- [`internal/db`](internal/db) contains the database interface plus mock and PostgreSQL implementations
+- [`internal/models`](internal/models) contains the `User` model
+
+## Requirements
+
+- Go `1.22+`
+- For PostgreSQL mode: a reachable Postgres database and a DSN
+
+Verify your toolchain:
 
 ```bash
-# Generate 100,000 records (default)
-go run cmd/generate/main.go
-
-# Generate 1 million records to a specific file
-go run cmd/generate/main.go -count 1000000 -output large_data.json
+go version
 ```
 
-### 2. Run the Uploader
-Run the uploader to process the generated file.
+Validate the repo:
 
 ```bash
-# Run with default settings (10 workers, batch size 100)
-go run cmd/uploader/main.go
-
-# Run with custom settings for higher performance
-go run cmd/uploader/main.go -file large_data.json -workers 50 -batch 1000
-
-# Run with custom retry + progress settings
-go run cmd/uploader/main.go -file large_data.json -workers 50 -batch 1000 -retries 5 -retry-delay-ms 200 -progress-interval 1
-
-# Upload to PostgreSQL (set your DSN first)
-export DATABASE_URL='postgres://user:pass@localhost:5432/mydb?sslmode=disable'
-go run cmd/uploader/main.go -driver postgres -dsn "$DATABASE_URL" -table users -file large_data.json -workers 20 -batch 500
+go test ./...
 ```
 
-### PostgreSQL Schema
-Create a destination table before running:
+## Data Model
+
+The uploader expects records matching this shape:
+
+```json
+{
+  "id": 1,
+  "name": "User 1",
+  "email": "user1@example.com",
+  "age": 30,
+  "city": "London",
+  "created_at": "2026-03-30T08:00:00Z"
+}
+```
+
+For PostgreSQL, the target table must match:
 
 ```sql
 CREATE TABLE IF NOT EXISTS users (
@@ -68,10 +81,167 @@ CREATE TABLE IF NOT EXISTS users (
 );
 ```
 
-## 📂 Project Structure
+## File-Based Uploads
 
-- `cmd/uploader`: Main entry point for the data uploader.
-- `cmd/generate`: Utility to generate random test data.
-- `internal/loader`: Core logic for file reading and worker pool management.
-- `internal/db`: Database interface and mock implementation.
-- `internal/models`: Data structures.
+### 1. Generate Test Data
+
+Generate a JSON array file:
+
+```bash
+go run ./cmd/generate -count 100000 -output data.json
+```
+
+Defaults:
+
+- output file: `data.json`
+- row count: `100000`
+
+### 2. Run Against Mock DB
+
+Use the mock driver to test the worker pool without a real database:
+
+```bash
+go run ./cmd/uploader -driver mock -file data.json -workers 10 -batch 100 -progress-interval 1
+```
+
+### 3. Run Against PostgreSQL
+
+Set your DSN and upload to a real table:
+
+```bash
+export DATABASE_URL='postgres://user:pass@localhost:5432/mydb?sslmode=disable'
+
+go run ./cmd/uploader \
+  -driver postgres \
+  -dsn "$DATABASE_URL" \
+  -table users \
+  -file data.json \
+  -workers 16 \
+  -batch 500 \
+  -max-open-conns 16 \
+  -max-idle-conns 16 \
+  -progress-interval 1
+```
+
+## Benchmark Mode
+
+The benchmark runner bypasses JSON files and generates records in memory, which is better when you want to isolate database ingest behavior.
+
+Example:
+
+```bash
+export DATABASE_URL='postgres://user:pass@localhost:5432/mydb?sslmode=disable'
+
+go run ./cmd/benchmark \
+  -dsn "$DATABASE_URL" \
+  -table users_benchmark \
+  -count 100000 \
+  -workers 16 \
+  -batch 500 \
+  -max-open-conns 16 \
+  -max-idle-conns 16 \
+  -progress-interval 0
+```
+
+The benchmark runner:
+
+- creates the target benchmark table if needed
+- truncates it before each run
+- uploads generated records
+- prints a JSON result summary
+
+## Metrics Reported
+
+Both uploader mode and benchmark mode now report:
+
+- total rows inserted
+- elapsed time
+- average throughput
+- successful batch count
+- failed batch count
+- retry count
+- batch latency: avg, p50, p95, p99, max
+- DB exec latency: avg, p50, p95, p99, max
+- `database/sql` pool stats
+
+## Important Flags
+
+### Shared Upload Flags
+
+- `-workers`: number of worker goroutines
+- `-batch`: rows per insert batch
+- `-retries`: retries for failed batch inserts
+- `-retry-delay-ms`: base retry delay
+- `-progress-interval`: seconds between progress logs, `0` disables
+
+### PostgreSQL Flags
+
+- `-dsn`: Postgres connection string
+- `-table`: destination table
+- `-max-open-conns`: `database/sql` max open connections
+- `-max-idle-conns`: `database/sql` max idle connections
+- `-conn-max-lifetime-s`: connection lifetime in seconds
+- `-conn-max-idle-time-s`: connection idle timeout in seconds
+
+### File Uploader Only
+
+- `-file`: input JSON file path
+- `-driver`: `mock` or `postgres`
+
+### Benchmark Only
+
+- `-count`: number of generated rows
+
+## Failure Behavior
+
+This project now fails loudly on real ingest failures.
+
+- Permanent batch failures cause the run to exit non-zero
+- File read failures are propagated back to the main process
+- Invalid worker and batch configurations are rejected up front
+
+This matters because earlier versions could silently report success while dropping failed batches.
+
+## Observed Performance
+
+On the tested Neon setup, the best measured configuration was:
+
+- `workers=16`
+- `batch=500`
+- `max-open-conns=16`
+- `max-idle-conns=16`
+
+Measured DB-ingest results:
+
+| Rows | Time | Throughput |
+|---|---:|---:|
+| 100k | 4.11s | 24.3k rows/s |
+| 500k | 17.34s | 28.8k rows/s |
+| 1m | 34.28s | 29.2k rows/s |
+
+For the full write-up, see [`BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md).
+
+## Known Limitations
+
+- PostgreSQL ingest uses `INSERT ... VALUES`, which is slower than `COPY`
+- The project does not yet expose Prometheus metrics
+- There is no config file support yet
+- MySQL is not implemented
+- The current benchmark command generates rows in memory rather than reading files, by design
+
+## Recommended Next Steps
+
+If you want to push this toward production-grade ingest performance:
+
+1. Replace batched inserts with PostgreSQL `COPY`
+2. Move from `lib/pq` to `pgx`
+3. Benchmark against a direct Postgres endpoint if a pooler introduces protocol issues
+4. Keep worker and connection counts aligned with real DB capacity instead of increasing them blindly
+
+## Quick Start
+
+```bash
+go test ./...
+go run ./cmd/generate -count 100000 -output data.json
+go run ./cmd/uploader -driver mock -file data.json -workers 10 -batch 100
+```
