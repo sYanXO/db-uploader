@@ -7,6 +7,23 @@ It supports two main workflows:
 - file-driven uploads from a JSON array
 - direct synthetic benchmark runs against PostgreSQL
 
+## Performance Highlights
+
+The PostgreSQL ingest path was upgraded from `lib/pq` with batched `INSERT ... VALUES` statements to `pgx` with `COPY`, then benchmarked against a real Neon database.
+
+| Rows | Old Throughput | New Throughput | Improvement |
+|---|---:|---:|---:|
+| 100k | 24.3k rows/s | 37.2k rows/s | 1.53x |
+| 500k | 28.8k rows/s | 41.6k rows/s | 1.44x |
+| 1m | 29.2k rows/s | 41.9k rows/s | 1.43x |
+
+- Throughput improved by `43%` to `53%` on the measured sizes.
+- `1m` upload time dropped from `34.28s` to `23.89s`.
+- `1m` latency tails improved from `p95=503ms / p99=741ms` to `p95=309ms / p99=523ms`.
+- The current scaling limit is Neon project storage quota, not Go worker concurrency.
+
+See [`BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md) for detailed methodology and full results.
+
 ## What It Does
 
 - Streams large JSON files without loading the entire dataset into memory
